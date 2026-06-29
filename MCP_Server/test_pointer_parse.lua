@@ -58,5 +58,56 @@ r = P("mov [ds:rcx+4],eax");      check("segment strip",   r and r.base=="rcx" a
 r = P("mov [rax+rcx],eax");       check("bail implicit scale", r==nil)
 r = P("nop");                     check("bail no operand", r==nil)
 
+assert(type(cmd_analyze_pointer_access) == "function", "UNIT-24 slice did not define cmd_analyze_pointer_access")
+
+local A = cmd_analyze_pointer_access
+
+local a
+a = A({ instruction="mov [rcx+04],eax", registers={ RCX="0x1000" } })
+check("analyze ok",            a.success==true)
+check("analyze struct_base",   a.struct_base=="0x00001000", a.struct_base)
+check("analyze next_scan",     a.next_scan_value=="0x00001000", a.next_scan_value)
+check("analyze disp",          a.displacement==4, a.displacement)
+check("analyze accessed",      a.accessed_address=="0x00001004", a.accessed_address)
+check("analyze not static",    a.is_static==false)
+
+-- 32-bit operand register resolves via alias to the 64-bit snapshot key.
+a = A({ instruction="mov [ecx+4],eax", registers={ RCX="0x2000" } })
+check("analyze alias 32->64",  a.success==true and a.struct_base=="0x00002000", a.struct_base)
+
+-- Indexed access: base is the array pointer; offset is index-dependent.
+a = A({ instruction="mov [rax+rcx*4+8],edx", registers={ RAX="0x1000", RCX="0x2" } })
+check("analyze indexed base",  a.struct_base=="0x00001000", a.struct_base)
+check("analyze indexed addr",  a.accessed_address=="0x00001010", a.accessed_address)
+check("analyze dynamic index", a.has_dynamic_index==true)
+check("analyze indexed warn",  #a.warnings >= 1)
+
+-- Absolute: static chain root, no next level to scan for.
+a = A({ instruction="mov [7FF60000],eax", registers={} })
+check("analyze absolute static", a.is_static==true)
+check("analyze absolute addr",   a.accessed_address=="0x7FF60000", a.accessed_address)
+check("analyze absolute no scan", a.next_scan_value==nil)
+
+-- RIP-relative: trust provided accessed_address (instr length unknown).
+a = A({ instruction="mov [rip+10],eax", registers={ RIP="0x7FF60000" }, accessed_address="0x7FF6ABCD" })
+check("analyze rip static",    a.is_static==true)
+check("analyze rip trusts addr", a.accessed_address=="0x7FF6ABCD", a.accessed_address)
+
+-- Missing register value -> error.
+a = A({ instruction="mov [rcx+4],eax", registers={ RAX="0x1" } })
+check("analyze missing reg",   a.success==false and a.error_code=="INVALID_PARAMS")
+
+-- Cross-check mismatch -> warning, still success.
+a = A({ instruction="mov [rcx+4],eax", registers={ RCX="0x1000" }, accessed_address="0x9999" })
+check("analyze crosscheck warn", a.success==true and #a.warnings >= 1)
+
+-- is_64bit sets scan_type.
+a = A({ instruction="mov [rcx+4],eax", registers={ RCX="0x1000" }, is_64bit=true })
+check("analyze scan_type",     a.scan_type=="qword", a.scan_type)
+
+-- Unrecognized operand bubbles up as INVALID_PARAMS.
+a = A({ instruction="mov [rax+rcx],eax", registers={ RAX="0x1000" } })
+check("analyze bail",          a.success==false and a.error_code=="INVALID_PARAMS")
+
 print(string.format("\n%d passed, %d failed", pass, fail))
 os.exit(fail == 0 and 0 or 1)

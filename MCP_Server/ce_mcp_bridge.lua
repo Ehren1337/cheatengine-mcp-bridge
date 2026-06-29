@@ -5404,6 +5404,117 @@ function parseMemoryOperand(instruction)
     return nil, "unrecognized memory operand: " .. raw
 end
 
+-- Coerce a hex-string ("0x..."), decimal string, or number to a number.
+function toNumberAny(v)
+    if type(v) == "number" then return v end
+    if type(v) == "string" then return tonumber(v) or tonumber(v, 16) end
+    return nil
+end
+
+-- Look up a register value from a hit snapshot, trying the 32/64-bit alias.
+function resolveRegisterValue(registers, regName)
+    local up = regName:upper()
+    local v = registers[up]
+    if v == nil then
+        local alias = POINTER_REG_ALIASES[up]
+        if alias then v = registers[alias] end
+    end
+    return toNumberAny(v)
+end
+
+-- Format a signed displacement as "+0xN" / "-0xN".
+function formatHexDisp(disp)
+    if disp == nil then return nil end
+    if disp < 0 then return string.format("-0x%X", -disp) end
+    return string.format("+0x%X", disp)
+end
+
+-- Turn one captured memory access into pointer-walk-back facts. Pure: no CE API calls.
+function cmd_analyze_pointer_access(params)
+    local instruction = params.instruction
+    local registers = params.registers
+    if type(instruction) ~= "string" then
+        return { success=false, error="instruction (string) is required", error_code="INVALID_PARAMS" }
+    end
+    if type(registers) ~= "table" then
+        return { success=false, error="registers (object) is required", error_code="INVALID_PARAMS" }
+    end
+
+    local op, err = parseMemoryOperand(instruction)
+    if not op then
+        return { success=false, error=err, error_code="INVALID_PARAMS" }
+    end
+
+    local warnings = {}
+    local result = {
+        success = true,
+        access_type = op.form,
+        base_register = op.base and op.base:upper() or nil,
+        index_register = op.index and op.index:upper() or nil,
+        scale = op.scale,
+        displacement = op.disp,
+        hex_displacement = formatHexDisp(op.disp),
+        struct_base = nil,
+        accessed_address = nil,
+        next_scan_value = nil,
+        is_static = (op.form == "rip_relative" or op.form == "absolute"),
+        has_dynamic_index = (op.form == "indexed"),
+        warnings = warnings,
+    }
+    if params.is_64bit ~= nil then
+        result.scan_type = params.is_64bit and "qword" or "dword"
+    end
+
+    -- Static roots terminate the chain; nothing to scan for.
+    if op.form == "absolute" then
+        result.accessed_address = toHex(op.disp)
+        result.note = "Absolute/global address. Chain root: map with get_address_info."
+        return result
+    end
+    if op.form == "rip_relative" then
+        if params.accessed_address ~= nil then
+            result.accessed_address = toHex(toNumberAny(params.accessed_address) or 0)
+        else
+            table.insert(warnings, "rip_relative: accessed_address not provided and cannot be computed without instruction length")
+        end
+        result.note = "RIP-relative/global. Chain root: map with get_address_info."
+        return result
+    end
+
+    -- register_indirect / indexed: climb one level.
+    local baseVal = resolveRegisterValue(registers, op.base)
+    if baseVal == nil then
+        return { success=false, error="register value not provided: " .. result.base_register, error_code="INVALID_PARAMS" }
+    end
+    result.struct_base = toHex(baseVal)
+    result.next_scan_value = toHex(baseVal)
+
+    local accessed = baseVal + (op.disp or 0)
+    if op.form == "indexed" then
+        local idxVal = resolveRegisterValue(registers, op.index)
+        if idxVal ~= nil then
+            accessed = baseVal + idxVal * (op.scale or 1) + (op.disp or 0)
+        else
+            accessed = nil
+            table.insert(warnings, "index register value not provided; accessed_address not computed")
+        end
+        table.insert(warnings, "indexed access: this level's offset (index*scale+disp) is index-dependent")
+    end
+    if accessed ~= nil then
+        result.accessed_address = toHex(accessed)
+    end
+
+    if params.accessed_address ~= nil and accessed ~= nil then
+        local given = toNumberAny(params.accessed_address)
+        if given ~= nil and given ~= accessed then
+            table.insert(warnings, "computed accessed_address differs from provided value; register state may lag the access")
+        end
+    end
+
+    result.note = "Scan for a pointer equal to next_scan_value to find the holder one level up. Repeat until struct_base lands in a static module (check with get_address_info)."
+    return result
+end
+
 -- >>> END UNIT-24 (continued in later tasks) <<<
 
 -- ============================================================================
@@ -5484,6 +5595,7 @@ local commandHandlers = {
     get_thread_list = cmd_get_thread_list,
     auto_assemble = cmd_auto_assemble,
     read_pointer_chain = cmd_read_pointer_chain,
+    analyze_pointer_access = cmd_analyze_pointer_access,
     get_rtti_classname = cmd_get_rtti_classname,
     get_address_info = cmd_get_address_info,
     checksum_memory = cmd_checksum_memory,

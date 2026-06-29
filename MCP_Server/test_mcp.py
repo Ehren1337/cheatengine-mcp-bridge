@@ -401,7 +401,20 @@ def main():
     # Run Category 1
     for test in ["ping", "get_process_info", "evaluate_lua_simple", "evaluate_lua_complex", "evaluate_lua_targetIs64Bit"]:
         all_tests[test].run(client)
-    
+
+    # UNIT-24: analyze_pointer_access is pure (no attached process required).
+    all_tests["analyze_pointer_access"] = TestCase(
+        "analyze_pointer_access (pure)", "analyze_pointer_access",
+        params={"instruction": "mov [rcx+04],eax", "registers": {"RCX": "0x1000"}},
+        validators=[
+            field_equals("success", True),
+            lambda r: (r.get("struct_base") == "0x00001000", f"struct_base={r.get('struct_base')}"),
+            lambda r: (r.get("displacement") == 4, f"displacement={r.get('displacement')}"),
+            lambda r: (r.get("next_scan_value") == "0x00001000", f"next_scan_value={r.get('next_scan_value')}"),
+        ]
+    )
+    all_tests["analyze_pointer_access"].run(client)
+
     # Get arch info for later tests
     arch_result = client.send_command("evaluate_lua", {"code": "return tostring(targetIs64Bit())"})
     is_64bit = arch_result.get("result", {}).get("result") == "true"
