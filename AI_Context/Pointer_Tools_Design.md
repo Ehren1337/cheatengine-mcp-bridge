@@ -1,6 +1,6 @@
 # Design: Pointer Walk-back Tools (UNIT-24)
 
-**Status:** 📐 Design — approved, not yet implemented
+**Status:** ✅ Implemented (UNIT-24)
 **Target:** bridge v12.x · wire `_v99`
 **Adds:** 2 MCP tools — `analyze_pointer_access`, `validate_pointer_chains`
 

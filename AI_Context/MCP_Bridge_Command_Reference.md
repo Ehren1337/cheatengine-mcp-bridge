@@ -3309,6 +3309,57 @@ All commands return `success: false` with an `error` field on failure:
 
 ---
 
+## 32. Pointer Analysis (Unit 24)
+
+### `analyze_pointer_access`
+
+**Purpose:** Turn one captured memory access (the instruction + register snapshot from a `get_breakpoint_hits` / `poll_dbvm_watch` hit) into pointer-chain walk-back facts. Pure analysis — no process access.
+
+**Parameters:**
+- `instruction` (str, required): e.g. `"mov [rcx+04],eax"`.
+- `registers` (object, required): register → value map, e.g. `{"RCX":"0x1F2A0"}`.
+- `accessed_address` (str, optional): the faulting address if known; cross-checked.
+- `is_64bit` (bool, optional): when set, adds a suggested `scan_type` (`qword`/`dword`).
+
+**Returns:** `success`, `access_type` (`register_indirect`|`indexed`|`rip_relative`|`absolute`), `base_register`, `index_register`, `scale`, `displacement`, `hex_displacement`, `struct_base`, `accessed_address`, `next_scan_value`, `is_static`, `has_dynamic_index`, `warnings`, `note`. Unrecognized operands return `{success:false, error_code:"INVALID_PARAMS"}`.
+
+**Example request:**
+```json
+{"method": "analyze_pointer_access", "params": {"instruction": "mov [rcx+04],eax", "registers": {"RCX": "0x1F2A0"}}}
+```
+
+**Example response:**
+```json
+{"success": true, "access_type": "register_indirect", "base_register": "RCX", "displacement": 4, "struct_base": "0x0001F2A0", "accessed_address": "0x0001F2A4", "next_scan_value": "0x0001F2A0", "is_static": false, "has_dynamic_index": false, "warnings": []}
+```
+
+---
+
+### `validate_pointer_chains`
+
+**Purpose:** Resolve many candidate chains and report which land on a known address. Re-run after a restart to find stable chains.
+
+**Parameters:**
+- `chains` (array, required): `[{"base": <addr|symbol>, "offsets": [int,...]}, ...]` (max 5000).
+- `target` (str, required): known current address of the value.
+- `include_misses` (bool, default false): also list non-matching chains.
+
+**Returns:** `success`, `target`, `total`, `matched`, `unreadable`, `matches` (`[{base, offsets, final_address, final_value}]`), and `misses` when `include_misses` is true.
+
+**Example request:**
+```json
+{"method": "validate_pointer_chains", "params": {"chains": [{"base": "0x7FF600000000", "offsets": [16, 0, 36]}], "target": "0x1F2A4"}}
+```
+
+**Example response:**
+```json
+{"success": true, "target": "0x0001F2A4", "total": 1, "matched": 1, "unreadable": 0, "matches": [{"base": "0x7FF600000000", "offsets": [16, 0, 36], "final_address": "0x0001F2A4", "final_value": 100}]}
+```
+
+**Walk-back recipe:** `start_dbvm_watch` → `poll_dbvm_watch` → `analyze_pointer_access` → `scan_all(next_scan_value, "qword")` → repeat until `get_address_info` shows a module → `validate_pointer_chains` (twice, across a restart).
+
+---
+
 ## Best Practices
 
 1. **Always call `ping` first** to verify connectivity before performing operations.
