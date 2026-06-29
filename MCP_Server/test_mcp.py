@@ -682,7 +682,31 @@ def main():
     # Run Category 4
     for test in ["disassemble", "get_instruction_info", "find_function_boundaries", "analyze_function"]:
         all_tests[test].run(client)
-    
+
+    # =========================================================================
+    # UNIT-24: validate_pointer_chains (derive a real chain, then validate it)
+    # =========================================================================
+    print("\n" + "=" * 70)
+    print("Testing: validate_pointer_chains (derived)")
+    print("=" * 70)
+    if pointer_chain_base:
+        rpc = client.send_command("read_pointer_chain", {"base": hex(pointer_chain_base), "offsets": [0]}).get("result", {})
+        derived_target = rpc.get("final_address")
+        if derived_target:
+            vr = client.send_command("validate_pointer_chains", {
+                "chains": [
+                    {"base": hex(pointer_chain_base), "offsets": [0]},
+                    {"base": hex(pointer_chain_base), "offsets": [0x7FFFFFF0]},  # resolves elsewhere (not a match)
+                ],
+                "target": derived_target,
+            }).get("result", {})
+            ok = vr.get("matched", 0) >= 1 and any(m.get("final_address") == derived_target for m in vr.get("matches", []))
+            print("✓ PASSED" if ok else f"✗ FAILED: {vr}")
+        else:
+            print(f"⊘ SKIPPED: could not derive a target via read_pointer_chain ({rpc})")
+    else:
+        print(f"⊘ SKIPPED: pointer-chain fixture unavailable ({pointer_chain_setup_error})")
+
     # =========================================================================
     # CATEGORY 5: Reference Finding
     # =========================================================================

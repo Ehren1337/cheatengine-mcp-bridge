@@ -1882,51 +1882,18 @@ end
 
 -- Read Pointer Chain: Follow a chain of pointers to resolve dynamic addresses
 function cmd_read_pointer_chain(params)
-    local base = params.base
     local offsets = params.offsets or {}
-    
-    if type(base) == "string" then base = getAddressSafe(base) end
-    if not base then return { success = false, error = "Invalid base address" } end
-    
-    local currentAddr = base
-    local chain = { { step = 0, address = toHex(currentAddr), description = "base" } }
-    
-    for i, offset in ipairs(offsets) do
-        -- Read pointer at current address
-        local ptr = readPointer(currentAddr)
-        if not ptr then
-            return {
-                success = false,
-                error = "Failed to read pointer at step " .. i,
-                partial_chain = chain,
-                failed_at_address = toHex(currentAddr)
-            }
-        end
-        
-        -- Apply offset
-        currentAddr = ptr + offset
-        table.insert(chain, {
-            step = i,
-            address = toHex(currentAddr),
-            offset = offset,
-            hex_offset = string.format("+0x%X", offset),
-            pointer_value = toHex(ptr)
-        })
+    local r = resolveChain(params.base, offsets)
+    if not r.ok then
+        return { success = false, error = r.error, partial_chain = r.chain, failed_at_address = r.failed_at }
     end
-    
-    -- Try to read a value at the final address (using readPointer for 32/64-bit compatibility)
-    local finalValue = nil
-    pcall(function()
-        finalValue = readPointer(currentAddr)
-    end)
-    
     return {
         success = true,
-        base = toHex(base),
+        base = r.base,
         offsets = offsets,
-        final_address = toHex(currentAddr),
-        final_value = finalValue,
-        chain = chain
+        final_address = r.final_address_hex,
+        final_value = r.final_value,
+        chain = r.chain
     }
 end
 
@@ -5515,7 +5482,82 @@ function cmd_analyze_pointer_access(params)
     return result
 end
 
--- >>> END UNIT-24 (continued in later tasks) <<<
+-- Resolve a pointer chain (CE convention: deref, then add offset). Uses CE's
+-- readPointer / getAddressSafe. Returns a table: ok + (final_address number,
+-- final_address_hex, final_value, chain) or (error, chain, failed_at).
+function resolveChain(base, offsets)
+    local baseNum = base
+    if type(baseNum) == "string" then baseNum = getAddressSafe(baseNum) end
+    if not baseNum then
+        return { ok=false, error="Invalid base address" }
+    end
+    local cur = baseNum
+    local chain = { { step=0, address=toHex(cur), description="base" } }
+    for i, offset in ipairs(offsets or {}) do
+        local ptr = readPointer(cur)
+        if not ptr then
+            return { ok=false, error="Failed to read pointer at step " .. i, chain=chain, failed_at=toHex(cur) }
+        end
+        cur = ptr + offset
+        table.insert(chain, {
+            step=i, address=toHex(cur), offset=offset,
+            hex_offset=string.format("+0x%X", offset), pointer_value=toHex(ptr),
+        })
+    end
+    local finalValue = nil
+    pcall(function() finalValue = readPointer(cur) end)
+    return { ok=true, base=toHex(baseNum), final_address=cur, final_address_hex=toHex(cur), final_value=finalValue, chain=chain }
+end
+
+-- Resolve many candidate chains; report which land on target (matches only by default).
+function cmd_validate_pointer_chains(params)
+    local chains = params.chains
+    if type(chains) ~= "table" then
+        return { success=false, error="chains (array) is required", error_code="INVALID_PARAMS" }
+    end
+    if #chains > 5000 then
+        return { success=false, error="Too many chains (max 5000); page the input.", error_code="INVALID_PARAMS" }
+    end
+    local target = params.target
+    if type(target) == "string" then target = getAddressSafe(target) end
+    if not target then
+        return { success=false, error="Invalid target address", error_code="INVALID_ADDRESS" }
+    end
+    local includeMisses = params.include_misses == true
+
+    local matched, unreadable = 0, 0
+    local matches = {}
+    local misses = includeMisses and {} or nil
+
+    for _, c in ipairs(chains) do
+        local offs = c.offsets or {}
+        local r = resolveChain(c.base, offs)
+        if not r.ok then
+            unreadable = unreadable + 1
+            if includeMisses then
+                table.insert(misses, { base=c.base, offsets=offs, error=r.error })
+            end
+        elseif r.final_address == target then
+            matched = matched + 1
+            table.insert(matches, { base=r.base, offsets=offs, final_address=r.final_address_hex, final_value=r.final_value })
+        elseif includeMisses then
+            table.insert(misses, { base=r.base, offsets=offs, final_address=r.final_address_hex, final_value=r.final_value })
+        end
+    end
+
+    local out = {
+        success = true,
+        target = toHex(target),
+        total = #chains,
+        matched = matched,
+        unreadable = unreadable,
+        matches = matches,
+    }
+    if includeMisses then out.misses = misses end
+    return out
+end
+
+-- >>> END UNIT-24 <<<
 
 -- ============================================================================
 -- COMMAND DISPATCHER
@@ -5596,6 +5638,7 @@ local commandHandlers = {
     auto_assemble = cmd_auto_assemble,
     read_pointer_chain = cmd_read_pointer_chain,
     analyze_pointer_access = cmd_analyze_pointer_access,
+    validate_pointer_chains = cmd_validate_pointer_chains,
     get_rtti_classname = cmd_get_rtti_classname,
     get_address_info = cmd_get_address_info,
     checksum_memory = cmd_checksum_memory,

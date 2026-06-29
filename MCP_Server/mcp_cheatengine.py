@@ -562,6 +562,15 @@ def analyze_pointer_access(instruction: str, registers: dict, accessed_address: 
     }))
 
 @mcp.tool()
+def validate_pointer_chains(chains: list, target: str, include_misses: bool = False) -> str:
+    """Resolve a list of candidate pointer chains and report which currently land on `target`. Each chain is {"base": <addr|symbol>, "offsets": [int,...]}. Returns only matches by default (token-frugal); set include_misses=true to also list non-matches. Re-run after a game restart with the new target to find chains that stay valid (the stable pointer). Max 5000 chains per call."""
+    return format_result(ce_client.send_command("validate_pointer_chains", {
+        "chains": chains,
+        "target": target,
+        "include_misses": include_misses,
+    }))
+
+@mcp.tool()
 def checksum_memory(address: str, size: int) -> str:
     """Calculate MD5 checksum of a memory region to detect changes."""
     return format_result(ce_client.send_command("checksum_memory", {"address": address, "size": size}))

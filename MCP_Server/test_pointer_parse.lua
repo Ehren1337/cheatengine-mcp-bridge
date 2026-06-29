@@ -109,5 +109,55 @@ check("analyze scan_type",     a.scan_type=="qword", a.scan_type)
 a = A({ instruction="mov [rax+rcx],eax", registers={ RAX="0x1000" } })
 check("analyze bail",          a.success==false and a.error_code=="INVALID_PARAMS")
 
+assert(type(cmd_validate_pointer_chains) == "function", "UNIT-24 slice did not define cmd_validate_pointer_chains")
+assert(type(resolveChain) == "function", "UNIT-24 slice did not define resolveChain")
+
+-- Stub the CE built-in readPointer with a fake address space. Use NUMERIC
+-- addresses everywhere so getAddressSafe is never invoked offline.
+local FAKE = { [0x1000]=0x2000, [0x2010]=0x3000, [0x3000]=0x64 }
+readPointer = function(addr) return FAKE[addr] end
+
+-- chain: base 0x1000, offsets [0x10, 0x0]
+--   read(0x1000)=0x2000; +0x10 -> 0x2010; read(0x2010)=0x3000; +0 -> 0x3000 (final)
+local v = cmd_validate_pointer_chains({
+    chains = {
+        { base=0x1000, offsets={0x10, 0x0} },   -- resolves to 0x3000 (match)
+        { base=0x9999, offsets={0x0} },          -- unreadable (no FAKE entry)
+        { base=0x1000, offsets={0x10, 0x4} },    -- resolves to 0x3004 (miss)
+    },
+    target = 0x3000,
+})
+check("validate total",     v.total==3, v.total)
+check("validate matched",   v.matched==1, v.matched)
+check("validate unreadable", v.unreadable==1, v.unreadable)
+check("validate match addr", v.matches[1] and v.matches[1].final_address=="0x00003000", v.matches[1] and v.matches[1].final_address)
+check("validate match value", v.matches[1] and v.matches[1].final_value==0x64, v.matches[1] and v.matches[1].final_value)
+check("validate hides misses", v.misses==nil)
+
+-- include_misses surfaces the non-matchers.
+local v2 = cmd_validate_pointer_chains({
+    chains = { { base=0x1000, offsets={0x10, 0x4} } },
+    target = 0x3000,
+    include_misses = true,
+})
+check("validate include_misses", v2.misses ~= nil and #v2.misses==1)
+
+-- Cap enforcement.
+local big = {}
+for i=1,5001 do big[i] = { base=0x1000, offsets={0x0} } end
+local v3 = cmd_validate_pointer_chains({ chains=big, target=0x1000 })
+check("validate cap", v3.success==false and v3.error_code=="INVALID_PARAMS")
+
+-- resolveChain (the shared helper, in the UNIT-24 slice) is offline-testable directly.
+-- cmd_read_pointer_chain itself (line 1884) is outside the slice; its refactor is a
+-- thin key-remap over resolveChain and is verified by the live read_pointer_chain path.
+local rcok = resolveChain(0x1000, {0x10, 0x0})
+check("resolveChain ok",    rcok.ok==true)
+check("resolveChain final", rcok.final_address_hex=="0x00003000", rcok.final_address_hex)
+check("resolveChain value", rcok.final_value==0x64, rcok.final_value)
+check("resolveChain steps", rcok.chain and #rcok.chain==3, rcok.chain and #rcok.chain)
+local rcbad = resolveChain(0x9999, {0x0})
+check("resolveChain fail",  rcbad.ok==false)
+
 print(string.format("\n%d passed, %d failed", pass, fail))
 os.exit(fail == 0 and 0 or 1)
