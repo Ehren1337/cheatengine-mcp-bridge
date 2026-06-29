@@ -5332,6 +5332,80 @@ end
 
 -- >>> END UNIT-07 <<<
 
+-- >>> BEGIN UNIT-24 Pointer Analysis <<<
+
+-- Bidirectional 32<->64-bit general-purpose register name aliases (uppercase keys).
+-- Global (not local) to avoid the >200-local chunk compile limit.
+POINTER_REG_ALIASES = {
+    RAX="EAX", EAX="RAX", RBX="EBX", EBX="RBX", RCX="ECX", ECX="RCX",
+    RDX="EDX", EDX="RDX", RSI="ESI", ESI="RSI", RDI="EDI", EDI="RDI",
+    RBP="EBP", EBP="RBP", RSP="ESP", ESP="RSP", RIP="EIP", EIP="RIP",
+    R8="R8D", R8D="R8", R9="R9D", R9D="R9", R10="R10D", R10D="R10",
+    R11="R11D", R11D="R11", R12="R12D", R12D="R12", R13="R13D", R13D="R13",
+    R14="R14D", R14D="R14", R15="R15D", R15D="R15",
+}
+
+function isPointerRegister(name)
+    return name ~= nil and POINTER_REG_ALIASES[name:upper()] ~= nil
+end
+
+-- Parse a signed hex displacement string like "+1A" or "-08" -> integer.
+function parseHexDisp(s)
+    local sign, hex = s:match("^([%+%-])(%x+)$")
+    if not hex then return nil end
+    local v = tonumber(hex, 16)
+    if sign == "-" then return -v end
+    return v
+end
+
+-- Parse the first [...] memory operand of an instruction string.
+-- Returns a table { form, base, index, scale, disp } or (nil, errmsg).
+-- Displacements are hex (CE disassembly convention).
+function parseMemoryOperand(instruction)
+    if type(instruction) ~= "string" then
+        return nil, "instruction must be a string"
+    end
+    local raw = instruction:match("%[([^%]]+)%]")
+    if not raw then
+        return nil, "no memory operand found in: " .. instruction
+    end
+    -- Normalize: drop spaces, lowercase, strip segment override (e.g. ds:).
+    local op = raw:gsub("%s+", ""):lower():gsub("^[cdsefg]s:", "")
+
+    local b, i, s, d
+
+    -- [base+index*scale+disp] / [base+index*scale-disp]
+    b, i, s, d = op:match("^(%w+)%+(%w+)%*(%d+)([%+%-]%x+)$")
+    if b then
+        return { form="indexed", base=b, index=i, scale=tonumber(s), disp=parseHexDisp(d) }
+    end
+    -- [base+index*scale]
+    b, i, s = op:match("^(%w+)%+(%w+)%*(%d+)$")
+    if b then
+        return { form="indexed", base=b, index=i, scale=tonumber(s), disp=0 }
+    end
+    -- [base+disp] / [base-disp]  (base must be a register)
+    b, d = op:match("^(%w+)([%+%-]%x+)$")
+    if b and isPointerRegister(b) then
+        local form = (b=="rip" or b=="eip") and "rip_relative" or "register_indirect"
+        return { form=form, base=b, index=nil, scale=nil, disp=parseHexDisp(d) }
+    end
+    -- [base]  (register)
+    b = op:match("^(%w+)$")
+    if b and isPointerRegister(b) then
+        return { form="register_indirect", base=b, index=nil, scale=nil, disp=0 }
+    end
+    -- [disp]  (absolute / direct address; all hex digits)
+    local abs = op:match("^(%x+)$")
+    if abs then
+        return { form="absolute", base=nil, index=nil, scale=nil, disp=tonumber(abs, 16) }
+    end
+
+    return nil, "unrecognized memory operand: " .. raw
+end
+
+-- >>> END UNIT-24 (continued in later tasks) <<<
+
 -- ============================================================================
 -- COMMAND DISPATCHER
 -- ============================================================================
