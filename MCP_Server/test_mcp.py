@@ -401,7 +401,20 @@ def main():
     # Run Category 1
     for test in ["ping", "get_process_info", "evaluate_lua_simple", "evaluate_lua_complex", "evaluate_lua_targetIs64Bit"]:
         all_tests[test].run(client)
-    
+
+    # UNIT-24: analyze_pointer_access is pure (no attached process required).
+    all_tests["analyze_pointer_access"] = TestCase(
+        "analyze_pointer_access (pure)", "analyze_pointer_access",
+        params={"instruction": "mov [rcx+04],eax", "registers": {"RCX": "0x1000"}},
+        validators=[
+            field_equals("success", True),
+            lambda r: (r.get("struct_base") == "0x00001000", f"struct_base={r.get('struct_base')}"),
+            lambda r: (r.get("displacement") == 4, f"displacement={r.get('displacement')}"),
+            lambda r: (r.get("next_scan_value") == "0x00001000", f"next_scan_value={r.get('next_scan_value')}"),
+        ]
+    )
+    all_tests["analyze_pointer_access"].run(client)
+
     # Get arch info for later tests
     arch_result = client.send_command("evaluate_lua", {"code": "return tostring(targetIs64Bit())"})
     is_64bit = arch_result.get("result", {}).get("result") == "true"
@@ -669,7 +682,31 @@ def main():
     # Run Category 4
     for test in ["disassemble", "get_instruction_info", "find_function_boundaries", "analyze_function"]:
         all_tests[test].run(client)
-    
+
+    # =========================================================================
+    # UNIT-24: validate_pointer_chains (derive a real chain, then validate it)
+    # =========================================================================
+    print("\n" + "=" * 70)
+    print("Testing: validate_pointer_chains (derived)")
+    print("=" * 70)
+    if pointer_chain_base:
+        rpc = client.send_command("read_pointer_chain", {"base": hex(pointer_chain_base), "offsets": [0]}).get("result", {})
+        derived_target = rpc.get("final_address")
+        if derived_target:
+            vr = client.send_command("validate_pointer_chains", {
+                "chains": [
+                    {"base": hex(pointer_chain_base), "offsets": [0]},
+                    {"base": hex(pointer_chain_base), "offsets": [0x7FFFFFF0]},  # resolves elsewhere (not a match)
+                ],
+                "target": derived_target,
+            }).get("result", {})
+            ok = vr.get("matched", 0) >= 1 and any(m.get("final_address") == derived_target for m in vr.get("matches", []))
+            print("✓ PASSED" if ok else f"✗ FAILED: {vr}")
+        else:
+            print(f"⊘ SKIPPED: could not derive a target via read_pointer_chain ({rpc})")
+    else:
+        print(f"⊘ SKIPPED: pointer-chain fixture unavailable ({pointer_chain_setup_error})")
+
     # =========================================================================
     # CATEGORY 5: Reference Finding
     # =========================================================================

@@ -552,6 +552,25 @@ def read_pointer_chain(base: str, offsets: list[int]) -> str:
     return format_result(ce_client.send_command("read_pointer_chain", {"base": base, "offsets": offsets}))
 
 @mcp.tool()
+def analyze_pointer_access(instruction: str, registers: dict, accessed_address: str = None, is_64bit: bool = None) -> str:
+    """Parse a captured memory access (instruction + register snapshot from a breakpoint/DBVM hit) into base register, displacement, and the concrete struct-base address for pointer-chain walk-back. Pure analysis; no process access. next_scan_value is the address to scan for (as a pointer) to find the next level up."""
+    return format_result(ce_client.send_command("analyze_pointer_access", {
+        "instruction": instruction,
+        "registers": registers,
+        "accessed_address": accessed_address,
+        "is_64bit": is_64bit,
+    }))
+
+@mcp.tool()
+def validate_pointer_chains(chains: list, target: str, include_misses: bool = False) -> str:
+    """Resolve a list of candidate pointer chains and report which currently land on `target`. Each chain is {"base": <addr|symbol>, "offsets": [int,...]}. Returns only matches by default (token-frugal); set include_misses=true to also list non-matches. Re-run after a game restart with the new target to find chains that stay valid (the stable pointer). Max 5000 chains per call."""
+    return format_result(ce_client.send_command("validate_pointer_chains", {
+        "chains": chains,
+        "target": target,
+        "include_misses": include_misses,
+    }))
+
+@mcp.tool()
 def checksum_memory(address: str, size: int) -> str:
     """Calculate MD5 checksum of a memory region to detect changes."""
     return format_result(ce_client.send_command("checksum_memory", {"address": address, "size": size}))
