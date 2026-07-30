@@ -490,9 +490,17 @@
 **Purpose:** Perform a value-based memory scan (like CE's memory scanner).
 
 **Parameters:**
-- `value` (str, required): Value to search for.
+- `value` (str, optional): Value to search for. Omit when `scan_option` is `"unknown"`.
 - `type` (str, default=`"dword"`): Value type — `"byte"`, `"word"`, `"dword"`, `"qword"`, `"float"`, `"double"`, `"string"`.
 - `protection` (str, default=`"+W-C"`): Memory protection filter. `+W-C` = writable, not copy-on-write.
+- `scan_option` (str, default=`"exact"`): One of `"exact"`, `"unknown"`, `"between"`, `"bigger"`, `"smaller"`.
+- `value2` (str, optional): Upper bound for `"between"`. See **Between scans** below.
+
+**Between scans:** CE's `firstScan`/`nextScan` take two inputs, and `between`
+needs both. Pass the bounds either as `value="0"` + `value2="1"`, or packed into
+`value` as `"min,max"` / `"min..max"` (e.g. `"0,1"`). A single unpacked value is
+rejected with `INVALID_PARAMS` rather than silently scanning for nothing.
+`-` is not accepted as a separator because it collides with negative numbers.
 
 **Returns:** JSON with:
 - `success` (bool)
@@ -501,6 +509,11 @@
 **Example request:**
 ```json
 {"method": "scan_all", "params": {"value": "100", "type": "dword"}}
+```
+
+**Example request (between):**
+```json
+{"method": "scan_all", "params": {"value": "0", "value2": "1", "type": "dword", "scan_option": "between"}}
 ```
 
 **Example response:**
@@ -544,8 +557,9 @@
 **Purpose:** Filter results from a previous scan, narrowing down candidates.
 
 **Parameters:**
-- `value` (str, optional): New value to scan for. Required when `scan_type` is `"exact"`, `"bigger"`, or `"smaller"`; omit for `"increased"`, `"decreased"`, `"changed"`, `"unchanged"`.
-- `scan_type` (str, default=`"exact"`): One of `"exact"`, `"increased"`, `"decreased"`, `"changed"`, `"unchanged"`, `"bigger"`, `"smaller"`.
+- `value` (str, optional): New value to scan for. Required when `scan_type` is `"exact"`, `"between"`, `"bigger"`, `"smaller"`, `"increased_by"`, or `"decreased_by"`; omit for `"increased"`, `"decreased"`, `"changed"`, `"unchanged"`.
+- `scan_type` (str, default=`"exact"`): One of `"exact"`, `"between"`, `"bigger"`, `"smaller"`, `"increased"`, `"decreased"`, `"increased_by"`, `"decreased_by"`, `"changed"`, `"unchanged"`. Also accepted as `scan_option`.
+- `value2` (str, optional): Upper bound for `"between"` (see **Between scans** under `scan_all`).
 
 **Returns:** JSON with:
 - `success` (bool)
@@ -2180,12 +2194,12 @@
 **Purpose:** Create a persistent scan session that survives multiple next-scans.
 
 **Parameters:**
-- `value_type` (str, required): Value type to scan for (e.g., `"4Bytes"`, `"Float"`).
-- `protection` (str, default=`"+W-C"`): Memory protection filter.
+- `name` (str, required): Caller-chosen identifier for the session. Re-using an
+  existing name destroys the old session first.
 
 **Returns:** JSON with:
 - `success` (bool)
-- `scan_id` (str): Identifier for this persistent scan session.
+- `scan_name` (str): Identifier for this persistent scan session.
 
 ---
 
@@ -2194,14 +2208,21 @@
 **Purpose:** Perform the initial scan in a persistent scan session.
 
 **Parameters:**
-- `scan_id` (str, required): Persistent scan session ID.
-- `value` (str, required): Value to scan for.
-- `scan_type` (str, default=`"exact"`): Scan type.
+- `name` (str, required): Persistent scan session name.
+- `value` (str, optional): Value to scan for. Omit when `scan_option` is `"unknown"`.
+- `type` (str, default=`"dword"`): Value type — `"byte"`, `"word"`, `"dword"`, `"qword"`, `"float"`, `"double"`, `"string"`.
+- `scan_option` (str, default=`"exact"`): One of `"exact"`, `"unknown"`, `"between"`, `"bigger"`, `"smaller"`.
+- `value2` (str, optional): Upper bound for `"between"` (see **Between scans** under `scan_all`).
 
 **Returns:** JSON with:
 - `success` (bool)
-- `scan_id` (str)
+- `scan_name` (str)
 - `count` (int): Initial result count.
+
+**Example request (between):**
+```json
+{"method": "persistent_scan_first_scan", "params": {"name": "hp", "type": "dword", "scan_option": "between", "value": "0", "value2": "1"}}
+```
 
 ---
 
@@ -2210,13 +2231,14 @@
 **Purpose:** Perform a follow-up scan in a persistent scan session.
 
 **Parameters:**
-- `scan_id` (str, required): Persistent scan session ID.
-- `value` (str, optional): New value (required for exact/bigger/smaller).
-- `scan_type` (str, default=`"exact"`): Scan type.
+- `name` (str, required): Persistent scan session name.
+- `value` (str, optional): New value. Required for `"exact"`, `"between"`, `"bigger"`, `"smaller"`, `"increased_by"`, `"decreased_by"`.
+- `scan_option` (str, default=`"exact"`): One of `"exact"`, `"between"`, `"bigger"`, `"smaller"`, `"increased"`, `"decreased"`, `"increased_by"`, `"decreased_by"`, `"changed"`, `"unchanged"`.
+- `value2` (str, optional): Upper bound for `"between"`.
 
 **Returns:** JSON with:
 - `success` (bool)
-- `scan_id` (str)
+- `scan_name` (str)
 - `count` (int): Remaining result count.
 
 ---
@@ -2226,15 +2248,16 @@
 **Purpose:** Retrieve results from a persistent scan session.
 
 **Parameters:**
-- `scan_id` (str, required): Persistent scan session ID.
+- `name` (str, required): Persistent scan session name.
 - `offset` (int, default=0): Result offset for pagination.
 - `limit` (int, default=100): Maximum results to return.
 
 **Returns:** JSON with:
 - `success` (bool)
-- `scan_id` (str)
-- `count` (int): Total result count.
-- `addresses` (array): Hex address strings for this page.
+- `scan_name` (str)
+- `total` (int): Total result count.
+- `offset` (int), `limit` (int)
+- `results` (array): List of `{address, value}` for this page.
 
 ---
 
@@ -2243,11 +2266,12 @@
 **Purpose:** Destroy a persistent scan session and free its resources.
 
 **Parameters:**
-- `scan_id` (str, required): Persistent scan session ID.
+- `name` (str, required): Persistent scan session name.
 
 **Returns:** JSON with:
 - `success` (bool)
-- `scan_id` (str)
+- `scan_name` (str)
+- `destroyed` (bool)
 
 ---
 
@@ -3161,9 +3185,9 @@ Several tools that return potentially large result sets support pagination via `
 offset = 0
 page_size = 100
 while True:
-    result = persistent_scan_get_results(scan_id="...", offset=offset, limit=page_size)
-    process(result["addresses"])
-    if len(result["addresses"]) < page_size:
+    result = persistent_scan_get_results(name="...", offset=offset, limit=page_size)
+    process(result["results"])
+    if len(result["results"]) < page_size:
         break
     offset += page_size
 ```
@@ -3298,13 +3322,13 @@ All commands return `success: false` with an `error` field on failure:
 ### Example 4: Persistent Multi-Step Scan
 
 ```
-1. create_persistent_scan(value_type="4Bytes") → scan_id="scan_1"
-2. persistent_scan_first_scan(scan_id="scan_1", value="100")  → count: 50000
+1. create_persistent_scan(name="gold") → scan_name="gold"
+2. persistent_scan_first_scan(name="gold", type="dword", value="100")  → count: 50000
 3. [Spend gold in game]
-4. persistent_scan_next_scan(scan_id="scan_1", scan_type="decreased") → count: 500
-5. persistent_scan_next_scan(scan_id="scan_1", value="75") → count: 3
-6. persistent_scan_get_results(scan_id="scan_1") → ["0x12345678", ...]
-7. persistent_scan_destroy(scan_id="scan_1")
+4. persistent_scan_next_scan(name="gold", scan_option="decreased") → count: 500
+5. persistent_scan_next_scan(name="gold", value="75") → count: 3
+6. persistent_scan_get_results(name="gold") → [{"address": "0x12345678", ...}]
+7. persistent_scan_destroy(name="gold")
 ```
 
 ---
