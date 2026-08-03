@@ -131,6 +131,61 @@ local function paginate(params, items, defaultLimit)
     return limit, offset, page, total
 end
 
+-- Map a human-readable scan_option to a CE scan constant.
+-- Returns nil for unrecognized options so callers can report INVALID_PARAMS instead of silently falling back to an exact scan.
+-- Global (not local) so handlers defined earlier in the chunk can call it and so it doesn't consume one of Lua's 200 local slots.
+function resolveScanOption(opt)
+    local o = tostring(opt or "exact"):lower()
+    if o == "exact"             then return soExactValue
+    elseif o == "unknown"       then return soUnknownValue
+    elseif o == "between"       then return soValueBetween
+    elseif o == "bigger"        then return soBiggerThan
+    elseif o == "smaller"       then return soSmallerThan
+    elseif o == "increased"     then return soIncreasedValue
+    elseif o == "increased_by"  then return soIncreasedValueBy
+    elseif o == "decreased"     then return soDecreasedValue
+    elseif o == "decreased_by"  then return soDecreasedValueBy
+    elseif o == "changed"       then return soChanged
+    elseif o == "unchanged"     then return soUnchanged
+    else return nil
+    end
+end
+
+SCAN_OPTION_NAMES = "exact, unknown, between, bigger, smaller, increased, increased_by, decreased, decreased_by, changed, unchanged"
+
+-- CE's firstScan/nextScan take two inputs; soValueBetween (and the *_by options) need BOTH of them.
+-- Passing the bounds as a single "0,1" string with input2 = nil makes CE scan for garbage and return 0 hits.
+-- Returns: input1, input2, errorMessage
+--   "between" accepts either an explicit value2, or a single value holding both bounds separated by "," or ".." (e.g. "0,1" / "0..1").
+--   "-" is deliberately not a separator because it collides with negative numbers.
+function resolveScanInputs(scanOpt, value, value2)
+    -- Options that compare against the previous scan take no input at all.
+    if scanOpt == soUnknownValue or scanOpt == soChanged or scanOpt == soUnchanged
+       or scanOpt == soIncreasedValue or scanOpt == soDecreasedValue then
+        return nil, nil, nil
+    end
+
+    if scanOpt == soValueBetween then
+        local lo, hi
+        if value2 ~= nil and tostring(value2) ~= "" then
+            lo, hi = value, value2
+        else
+            local s = tostring(value or "")
+            lo, hi = s:match("^%s*(.-)%s*,%s*(.-)%s*$")
+            if not lo then lo, hi = s:match("^%s*(.-)%s*%.%.%s*(.-)%s*$") end
+        end
+        if lo == nil or hi == nil or tostring(lo) == "" or tostring(hi) == "" then
+            return nil, nil, "'between' needs two bounds: pass value2, or value as \"min,max\" (e.g. \"0,1\")"
+        end
+        return tostring(lo), tostring(hi), nil
+    end
+
+    if value == nil or tostring(value) == "" then
+        return nil, nil, "This scan option requires a value"
+    end
+    return tostring(value), nil, nil
+end
+
 -- ============================================================================
 -- SHARED HELPERS (Unit 5 refactor — used by multiple cmd_* handlers)
 -- ============================================================================
@@ -853,24 +908,37 @@ end
 function cmd_scan_all(params)
     local value = params.value
     local vtype = params.type or "dword"
-    
-    local ms = createMemScan()
-    local scanOpt = soExactValue
+
+    local scanOpt = resolveScanOption(params.scan_option or "exact")
+    if not scanOpt then
+        return { success = false, error = "Unknown scan_option '" .. tostring(params.scan_option) .. "'. Valid: " .. SCAN_OPTION_NAMES, error_code = "INVALID_PARAMS" }
+    end
+    if scanOpt ~= soExactValue and scanOpt ~= soUnknownValue and scanOpt ~= soValueBetween
+       and scanOpt ~= soBiggerThan and scanOpt ~= soSmallerThan then
+        return { success = false, error = "scan_option '" .. tostring(params.scan_option) .. "' is only valid for next_scan. First scan supports: exact, unknown, between, bigger, smaller", error_code = "INVALID_PARAMS" }
+    end
+
+    local input1, input2, inputErr = resolveScanInputs(scanOpt, value, params.value2)
+    if inputErr then
+        return { success = false, error = inputErr, error_code = "INVALID_PARAMS" }
+    end
+
     local varType = vtDword
-    
     if vtype == "byte" then varType = vtByte
     elseif vtype == "word" then varType = vtWord
     elseif vtype == "qword" then varType = vtQword
     elseif vtype == "float" then varType = vtSingle
     elseif vtype == "double" then varType = vtDouble
     elseif vtype == "string" then varType = vtString end
-    
+
+    local ms = createMemScan()
+
     -- Use specific protection flags if provided (defaults to +W-C from Python)
     -- CRITICAL: Limit scan to User Mode space (0x7FFFFFFFFFFFFFFF) to prevent BSODs in Kernel/Guard regions
     local protect = params.protection or "+W-C"
-    ms.firstScan(scanOpt, varType, rtRounded, tostring(value), nil, 0, 0x7FFFFFFFFFFFFFFF, protect, fsmNotAligned, "1", false, false, false, false)
+    ms.firstScan(scanOpt, varType, rtRounded, input1, input2, 0, 0x7FFFFFFFFFFFFFFF, protect, fsmNotAligned, "1", false, false, false, false)
     ms.waitTillDone()
-    
+
     local fl = createFoundList(ms)
     fl.initialize()
     local count = fl.getCount()
@@ -926,30 +994,30 @@ end
 
 function cmd_next_scan(params)
     local value = params.value
-    local scanType = params.scan_type or "exact"
-    
+    -- scan_option is the v12 name; scan_type is kept as a backward-compat alias
+    local scanType = params.scan_option or params.scan_type or "exact"
+
     if not serverState.scan_memscan then
         return { success = false, error = "No previous scan. Run scan_all first." }
     end
-    
+
     local ms = serverState.scan_memscan
-    local scanOpt = soExactValue
-    
-    if scanType == "increased" then scanOpt = soIncreasedValue
-    elseif scanType == "decreased" then scanOpt = soDecreasedValue
-    elseif scanType == "changed" then scanOpt = soChanged
-    elseif scanType == "unchanged" then scanOpt = soUnchanged
-    elseif scanType == "bigger" then scanOpt = soBiggerThan
-    elseif scanType == "smaller" then scanOpt = soSmallerThan
+    local scanOpt = resolveScanOption(scanType)
+    if not scanOpt then
+        return { success = false, error = "Unknown scan_option '" .. tostring(scanType) .. "'. Valid: " .. SCAN_OPTION_NAMES, error_code = "INVALID_PARAMS" }
     end
-    
-    if scanOpt == soExactValue then
-        ms.nextScan(scanOpt, rtRounded, tostring(value), nil, false, false, false, false, false)
-    else
-        ms.nextScan(scanOpt, rtRounded, nil, nil, false, false, false, false, false)
+    if scanOpt == soUnknownValue then
+        return { success = false, error = "scan_option 'unknown' is only valid for scan_all", error_code = "INVALID_PARAMS" }
     end
+
+    local input1, input2, inputErr = resolveScanInputs(scanOpt, value, params.value2)
+    if inputErr then
+        return { success = false, error = inputErr, error_code = "INVALID_PARAMS" }
+    end
+
+    ms.nextScan(scanOpt, rtRounded, input1, input2, false, false, false, false, false)
     ms.waitTillDone()
-    
+
     if serverState.scan_foundlist then
         serverState.scan_foundlist.destroy()
     end
@@ -3570,21 +3638,7 @@ local function resolveVarType(vtype)
     end
 end
 
--- Helper: map human-readable scan_option to CE constant
-local function resolveScanOption(opt)
-    local o = (opt or "exact"):lower()
-    if o == "exact"          then return soExactValue
-    elseif o == "unknown"    then return soUnknownValue
-    elseif o == "between"    then return soValueBetween
-    elseif o == "bigger"     then return soBiggerThan
-    elseif o == "smaller"    then return soSmallerThan
-    elseif o == "increased"  then return soIncreasedValue
-    elseif o == "decreased"  then return soDecreasedValue
-    elseif o == "changed"    then return soChanged
-    elseif o == "unchanged"  then return soUnchanged
-    else return soExactValue
-    end
-end
+-- resolveScanOption / resolveScanInputs live in the HELPER FUNCTIONS section at the top of this file (global, so every cmd_* handler shares one mapping).
 
 function cmd_aob_scan_unique(params)
     local ok, err = requireProcess()
@@ -3775,20 +3829,31 @@ function cmd_persistent_scan_first_scan(params)
     local vtype       = params.type or "dword"
     local scan_option = params.scan_option or "exact"
 
-    if not name  then return { success = false, error = "No name provided",  error_code = "INVALID_PARAMS" } end
-    if not value then return { success = false, error = "No value provided", error_code = "INVALID_PARAMS" } end
+    if not name then return { success = false, error = "No name provided", error_code = "INVALID_PARAMS" } end
 
     local entry = serverState.persistent_scans[name]
     if not entry then
         return { success = false, error = "Scan '" .. name .. "' not found. Call create_persistent_scan first.", error_code = "INVALID_PARAMS" }
     end
 
-    local ms        = entry.ms
-    local varType   = resolveVarType(vtype)
-    local scanOpt   = resolveScanOption(scan_option)
+    local ms      = entry.ms
+    local varType = resolveVarType(vtype)
+    local scanOpt = resolveScanOption(scan_option)
+    if not scanOpt then
+        return { success = false, error = "Unknown scan_option '" .. tostring(scan_option) .. "'. Valid: " .. SCAN_OPTION_NAMES, error_code = "INVALID_PARAMS" }
+    end
+    if scanOpt ~= soExactValue and scanOpt ~= soUnknownValue and scanOpt ~= soValueBetween
+       and scanOpt ~= soBiggerThan and scanOpt ~= soSmallerThan then
+        return { success = false, error = "scan_option '" .. tostring(scan_option) .. "' is only valid for next_scan. First scan supports: exact, unknown, between, bigger, smaller", error_code = "INVALID_PARAMS" }
+    end
+
+    local input1, input2, inputErr = resolveScanInputs(scanOpt, value, params.value2)
+    if inputErr then
+        return { success = false, error = inputErr, error_code = "INVALID_PARAMS" }
+    end
 
     local fsOk, fsMsg = pcall(function()
-        ms.firstScan(scanOpt, varType, rtRounded, tostring(value), nil,
+        ms.firstScan(scanOpt, varType, rtRounded, input1, input2,
                      0, 0x7FFFFFFFFFFFFFFF, "+W-C", fsmNotAligned, "1",
                      false, false, false, false)
         ms.waitTillDone()
@@ -3833,13 +3898,20 @@ function cmd_persistent_scan_next_scan(params)
 
     local ms      = entry.ms
     local scanOpt = resolveScanOption(scan_option)
+    if not scanOpt then
+        return { success = false, error = "Unknown scan_option '" .. tostring(scan_option) .. "'. Valid: " .. SCAN_OPTION_NAMES, error_code = "INVALID_PARAMS" }
+    end
+    if scanOpt == soUnknownValue then
+        return { success = false, error = "scan_option 'unknown' is only valid for first_scan", error_code = "INVALID_PARAMS" }
+    end
+
+    local input1, input2, inputErr = resolveScanInputs(scanOpt, value, params.value2)
+    if inputErr then
+        return { success = false, error = inputErr, error_code = "INVALID_PARAMS" }
+    end
 
     local nsOk, nsMsg = pcall(function()
-        if scanOpt == soExactValue or scanOpt == soValueBetween or scanOpt == soBiggerThan or scanOpt == soSmallerThan then
-            ms.nextScan(scanOpt, rtRounded, tostring(value or ""), nil, false, false, false, false, false)
-        else
-            ms.nextScan(scanOpt, rtRounded, nil, nil, false, false, false, false, false)
-        end
+        ms.nextScan(scanOpt, rtRounded, input1, input2, false, false, false, false, false)
         ms.waitTillDone()
     end)
     if not nsOk then

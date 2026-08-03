@@ -1127,7 +1127,7 @@ def main():
         # First do a scan_all with a common dword value (1) so we have a baseline.
         all_tests["u24_scan_for_nextscan"] = TestCase(
             "Unit-24 scan_all baseline (value=1, dword)", "scan_all",
-            params={"value": "1", "type": "exact"},
+            params={"value": "1", "type": "dword"},
             validators=[
                 has_field("success", bool),
                 field_equals("success", True),
@@ -1171,6 +1171,36 @@ def main():
             skip_reason=_ns_filter_skip,
         )
         all_tests["u24_next_scan_changed"].run(client)
+
+        # Regression: 'between' used to pass both bounds as one string with input2=nil, so CE scanned for garbage and every between scan returned 0.
+        # A dword between 0 and 1 must match something in any live process.
+        all_tests["u24_scan_between_packed"] = TestCase(
+            "Unit-24 scan_all between via packed \"0,1\"", "scan_all",
+            params={"value": "0,1", "type": "dword", "scan_option": "between"},
+            validators=[
+                field_equals("success", True),
+                has_field("count", int),
+                lambda r: (r.get("count", 0) > 0,
+                           f"between 0,1 returned {r.get('count')} results (expected > 0)"),
+            ],
+            skip_reason=_nextscan_skip,
+        )
+        all_tests["u24_scan_between_packed"].run(client)
+
+        all_tests["u24_scan_between_value2"] = TestCase(
+            "Unit-24 scan_all between via value/value2", "scan_all",
+            params={"value": "0", "value2": "1", "type": "dword", "scan_option": "between"},
+            validators=[
+                field_equals("success", True),
+                has_field("count", int),
+                lambda r: (r.get("count", 0) > 0,
+                           f"between 0..1 returned {r.get('count')} results (expected > 0)"),
+            ],
+            skip_reason=_nextscan_skip,
+        )
+        all_tests["u24_scan_between_value2"].run(client)
+
+        # (The rejection cases for 'between' live in the Error Cases section below.)
 
         # -------------------------------------------------------------------------
         # Breakpoint lifecycle — execution breakpoint
@@ -1450,6 +1480,23 @@ def main():
         )
         all_tests["u24_err_invalid_addr"].run(client)
 
+        # A 'between' scan given only one bound must be rejected rather than silently scanning for garbage (the old behaviour returned count=0).
+        all_tests["u24_err_between_one_bound"] = _ErrorCase(
+            "Unit-24 Error: scan_all between with a single bound",
+            "scan_all",
+            params={"value": "0", "type": "dword", "scan_option": "between"},
+            validators=[_expect_error(error_code="INVALID_PARAMS")],
+        )
+        all_tests["u24_err_between_one_bound"].run(client)
+
+        all_tests["u24_err_bad_scan_option"] = _ErrorCase(
+            "Unit-24 Error: scan_all with an unknown scan_option",
+            "scan_all",
+            params={"value": "1", "type": "dword", "scan_option": "definitely_not_an_option"},
+            validators=[_expect_error(error_code="INVALID_PARAMS")],
+        )
+        all_tests["u24_err_bad_scan_option"].run(client)
+
         all_tests["u24_err_null_read"] = _ErrorCase(
             "Unit-24 Error: read_memory at 0x0 (expect error)",
             "read_memory",
@@ -1621,6 +1668,7 @@ def main():
     ]
     _u24_scan_keys = [
         "u24_scan_for_nextscan", "u24_next_scan_unchanged", "u24_next_scan_changed",
+        "u24_scan_between_packed", "u24_scan_between_value2",
     ]
     _u24_bp_keys = [
         "u24_set_breakpoint", "u24_get_bp_hits", "u24_remove_breakpoint",
@@ -1628,7 +1676,10 @@ def main():
         "u24_set_data_breakpoint", "u24_get_data_bp_hits", "u24_remove_data_breakpoint",
     ]
     _u24_page_keys = ["u24_page1", "u24_page2", "u24_pages_distinct"]
-    _u24_err_keys = ["u24_err_invalid_addr", "u24_err_null_read"]
+    _u24_err_keys = [
+        "u24_err_invalid_addr", "u24_err_null_read",
+        "u24_err_between_one_bound", "u24_err_bad_scan_option",
+    ]
     _u24_smoke_keys = [
         "u24_smoke_get_process_list", "u24_smoke_allocate_memory", "u24_smoke_free_memory",
         "u24_smoke_execute_code_local", "u24_smoke_enum_registered_symbols",

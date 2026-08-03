@@ -578,9 +578,22 @@ def checksum_memory(address: str, size: int) -> str:
 # --- SCANNING ---
 
 @mcp.tool()
-def scan_all(value: str, type: str = "exact", protection: str = "+W-C") -> str:
-    """Unified Memory Scanner. Types: exact, string, array. Protection: +W-C (Writable, Not Copy-on-Write)."""
-    return format_result(ce_client.send_command("scan_all", {"value": value, "type": type, "protection": protection}))
+def scan_all(value: str = None, type: str = "dword", protection: str = "+W-C",
+             scan_option: str = "exact", value2: str = None) -> str:
+    """Unified Memory Scanner (first scan).
+
+    Args:
+        value: Value to search for. Omit when scan_option is 'unknown'.
+        type: Value type: byte, word, dword, qword, float, double, string.
+        protection: +W-C (Writable, Not Copy-on-Write).
+        scan_option: exact, unknown, between, bigger, smaller.
+        value2: Upper bound for 'between'.
+            Alternatively pass both bounds in value as "min,max" (e.g. "0,1").
+    """
+    return format_result(ce_client.send_command("scan_all", {
+        "value": value, "type": type, "protection": protection,
+        "scan_option": scan_option, "value2": value2
+    }))
 
 @mcp.tool()
 def get_scan_results(offset: int = 0, limit: int = 100, max: int = None) -> str:
@@ -596,9 +609,17 @@ def get_scan_results(offset: int = 0, limit: int = 100, max: int = None) -> str:
     return format_result(ce_client.send_command("get_scan_results", {"offset": offset, "limit": limit, "max": max}))
 
 @mcp.tool()
-def next_scan(value: str, scan_type: str = "exact") -> str:
-    """Next scan to filter results. Types: exact, increased, decreased, changed, unchanged, bigger, smaller."""
-    return format_result(ce_client.send_command("next_scan", {"value": value, "scan_type": scan_type}))
+def next_scan(value: str = None, scan_type: str = "exact", value2: str = None) -> str:
+    """Next scan to filter results from the last 'scan_all'.
+
+    Args:
+        value: Value to compare against. Not needed for increased/decreased/changed/unchanged.
+        scan_type: exact, between, bigger, smaller, increased, decreased, increased_by, decreased_by, changed, unchanged.
+        value2: Upper bound for 'between'. Alternatively pass both bounds in value as "min,max" (e.g. "0,1").
+    """
+    return format_result(ce_client.send_command("next_scan", {
+        "value": value, "scan_type": scan_type, "value2": value2
+    }))
 
 @mcp.tool()
 def write_integer(address: str, value: int, type: str = "dword") -> str:
@@ -1626,26 +1647,31 @@ def create_persistent_scan(name: str) -> str:
     return format_result(ce_client.send_command("create_persistent_scan", {"name": name}))
 
 @mcp.tool()
-def persistent_scan_first_scan(name: str, value: str, type: str = "dword", scan_option: str = "exact") -> str:
+def persistent_scan_first_scan(name: str, value: str = None, type: str = "dword", scan_option: str = "exact", value2: str = None) -> str:
     """Run the first scan on a named persistent scan session.
     Types: byte, word, dword, qword, float, double, string.
     Scan options: exact, unknown, between, bigger, smaller.
+    'between' needs two bounds: pass value2, or put both in value as "min,max" (e.g. value="0,1").
+    'unknown' takes no value.
     Returns {success, scan_name, count}."""
-    return format_result(ce_client.send_command("persistent_scan_first_scan", {
-        "name": name,
-        "value": value,
-        "type": type,
-        "scan_option": scan_option
-    }))
+    params = {"name": name, "type": type, "scan_option": scan_option}
+    if value is not None:
+        params["value"] = value
+    if value2 is not None:
+        params["value2"] = value2
+    return format_result(ce_client.send_command("persistent_scan_first_scan", params))
 
 @mcp.tool()
-def persistent_scan_next_scan(name: str, value: str = None, scan_option: str = "exact") -> str:
+def persistent_scan_next_scan(name: str, value: str = None, scan_option: str = "exact", value2: str = None) -> str:
     """Narrow down results with a next scan on a named persistent scan session.
-    Scan options: exact, increased, decreased, changed, unchanged, bigger, smaller.
+    Scan options: exact, between, bigger, smaller, increased, decreased, increased_by, decreased_by, changed, unchanged.
+    'between' needs two bounds: pass value2, or put both in value as "min,max".
     Returns {success, scan_name, count}."""
     params = {"name": name, "scan_option": scan_option}
     if value is not None:
         params["value"] = value
+    if value2 is not None:
+        params["value2"] = value2
     return format_result(ce_client.send_command("persistent_scan_next_scan", params))
 
 @mcp.tool()
