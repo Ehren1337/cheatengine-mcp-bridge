@@ -13,6 +13,7 @@ local serverState = {
     connected = false,
     scan_memscan = nil,
     scan_foundlist = nil,
+    scan_is_unknown_first = false,   -- last scan_all was an "unknown initial value" first scan
     breakpoints = {},
     breakpoint_hits = {},
     hw_bp_slots = {},      -- Hardware breakpoint slots (max 4)
@@ -152,6 +153,21 @@ function resolveScanOption(opt)
 end
 
 SCAN_OPTION_NAMES = "exact, unknown, between, bigger, smaller, increased, increased_by, decreased, decreased_by, changed, unchanged"
+
+-- NOTE: "unknown initial value" (soUnknownValue) first scans store candidates
+-- per-region (fs_advanced / REGION file header). TFoundList.getCount() returns 0
+-- in that mode and the addresses are NOT individually enumerable (GetAddressOnly
+-- returns nothing), so the authoritative count is the total scanned addresses —
+-- every scanned address is a potential match. UNKNOWN_SCAN_NOTE is attached by the
+-- result readers so clients don't mistake the empty result list for a failed scan.
+UNKNOWN_SCAN_NOTE = "Unknown initial value scan: candidates are stored per-region and are not individually enumerable. Run a next_scan to narrow them down."
+function resolveScanResultCount(ms, fallbackCount)
+    local p = ms.getProgress()
+    if p and p.TotalAddressesToScan then
+        return p.TotalAddressesToScan
+    end
+    return fallbackCount
+end
 
 -- CE's firstScan/nextScan take two inputs; soValueBetween (and the *_by options) need BOTH of them.
 -- Passing the bounds as a single "0,1" string with input2 = nil makes CE scan for garbage and return 0 hits.
@@ -346,6 +362,7 @@ local function cleanupZombieState()
         pcall(function() serverState.scan_foundlist.destroy() end)
         serverState.scan_foundlist = nil
     end
+    serverState.scan_is_unknown_first = false
 
     -- 4. Cleanup persistent scans (Unit 15)
     if serverState.persistent_scans then
@@ -954,6 +971,12 @@ function cmd_scan_all(params)
 
     serverState.scan_memscan = ms
     serverState.scan_foundlist = fl
+    serverState.scan_is_unknown_first = (scanOpt == soUnknownValue)
+
+    -- unknown-initial-value scans report 0 via the foundlist; see resolveScanResultCount()
+    if scanOpt == soUnknownValue then
+        count = resolveScanResultCount(ms, count)
+    end
 
     return { success = true, count = count }
 end
@@ -971,6 +994,28 @@ function cmd_get_scan_results(params)
     local fl = serverState.scan_foundlist
     local total = fl.getCount()
     local results = {}
+
+    -- NOTE: unknown-initial-value scans are not individually enumerable via the
+    -- foundlist (see resolveScanResultCount()); report the scanned-address total
+    -- and signal it so an empty result list isn't mistaken for a scan failure.
+    if serverState.scan_is_unknown_first then
+        local ms = serverState.scan_memscan
+        if ms then
+            total = resolveScanResultCount(ms, total)
+        end
+        return {
+            success = true,
+            total = total,
+            offset = offset,
+            limit = limit,
+            returned = 0,
+            results = results,
+            enumerable = false,
+            unknown_initial_value = true,
+            note = UNKNOWN_SCAN_NOTE
+        }
+    end
+
     local endIdx = math.min(offset + limit, total) - 1
 
     for i = offset, endIdx do
@@ -1024,6 +1069,7 @@ function cmd_next_scan(params)
     local fl = createFoundList(ms)
     fl.initialize()
     serverState.scan_foundlist = fl
+    serverState.scan_is_unknown_first = false
     
     return { success = true, count = fl.getCount() }
 end
@@ -3812,9 +3858,10 @@ function cmd_create_persistent_scan(params)
     end
 
     serverState.persistent_scans[name] = {
-        ms       = ms,
-        fl       = nil,
-        has_scan = false
+        ms            = ms,
+        fl            = nil,
+        has_scan      = false,
+        unknown_first = false
     }
 
     return { success = true, scan_name = name }
@@ -3872,10 +3919,17 @@ function cmd_persistent_scan_first_scan(params)
         return { success = false, error = "createFoundList failed: " .. tostring(flMsg), error_code = "SCAN_ERROR" }
     end
 
-    entry.fl       = fl
-    entry.has_scan = true
+    entry.fl            = fl
+    entry.has_scan      = true
+    entry.unknown_first = (scanOpt == soUnknownValue)
 
-    return { success = true, scan_name = name, count = fl.getCount() }
+    local count = fl.getCount()
+    -- unknown-initial-value scans report 0 via the foundlist; see resolveScanResultCount()
+    if scanOpt == soUnknownValue then
+        count = resolveScanResultCount(ms, count)
+    end
+
+    return { success = true, scan_name = name, count = count }
 end
 
 function cmd_persistent_scan_next_scan(params)
@@ -3929,6 +3983,7 @@ function cmd_persistent_scan_next_scan(params)
     end
 
     entry.fl = fl
+    entry.unknown_first = false
 
     return { success = true, scan_name = name, count = fl.getCount() }
 end
@@ -3951,6 +4006,25 @@ function cmd_persistent_scan_get_results(params)
     local fl      = entry.fl
     local total   = fl.getCount()
     local results = {}
+
+    -- NOTE: unknown-initial-value scans are not individually enumerable via the
+    -- foundlist (see resolveScanResultCount()); report the scanned-address total
+    -- and signal it so an empty result list isn't mistaken for a scan failure.
+    if entry.unknown_first then
+        total = resolveScanResultCount(entry.ms, total)
+        return {
+            success              = true,
+            scan_name            = name,
+            total                = total,
+            offset               = offset,
+            limit                = limit,
+            returned             = 0,
+            results              = results,
+            enumerable           = false,
+            unknown_initial_value = true,
+            note = UNKNOWN_SCAN_NOTE
+        }
+    end
 
     local stop = math.min(offset + limit - 1, total - 1)
     for i = offset, stop do
